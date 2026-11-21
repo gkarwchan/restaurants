@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Alberta Inspections Map</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="toolbar">
+    <h1>Alberta Inspections</h1>
+    <input id="search" type="search" placeholder="Search name or city" autocomplete="off">
+    <div id="types" class="chips" aria-label="Facility type"></div>
+    <select id="status" aria-label="Last inspection result">
+      <option value="all">All results</option>
+      <option value="critical">Critical violations</option>
+      <option value="any">Any violations</option>
+      <option value="clean">No violations</option>
+    </select>
+    <span id="count" class="count">Loading…</span>
+  </header>
+
+  <main class="layout">
+    <div id="map" role="application" aria-label="Map of facilities"></div>
+    <div class="legend" id="legend"></div>
+    <aside id="panel" class="panel" hidden>
+      <button id="close" class="close" aria-label="Close">×</button>
+      <div id="panel-body"></div>
+    </aside>
+  </main>
+
+  <script src="https://unpkg.com/@googlemaps/markerclusterer@2.5.3/dist/index.min.js"></script>
+  <script src="/config.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
