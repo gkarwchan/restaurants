@@ -7,7 +7,7 @@ const STATUS = {
   clean:      { color: "#188038", label: "No violations at last inspection" },
   none:       { color: "#80868b", label: "No inspection data" },
 };
-const ALBERTA = { lat: 53.9, lng: -116.0 };
+const CALGARY = { lat: 51.0447, lng: -114.0719 };
 
 const state = { facilities: [], markers: [], types: new Set(TYPES), status: "all", query: "" };
 let map, clusterer, selectedId = null;
@@ -50,7 +50,7 @@ window.initMap = async function () {
   const { Map } = await google.maps.importLibrary("maps");
   const { AdvancedMarkerElement } = await google.maps.importLibrary("marker");
   map = new Map($("map"), {
-    center: ALBERTA, zoom: 6, mapId: window.APP_CONFIG.mapId,
+    center: CALGARY, zoom: 10, mapId: window.APP_CONFIG.mapId,
     mapTypeControl: false, streetViewControl: false, clickableIcons: false,
   });
 
