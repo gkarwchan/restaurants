@@ -119,11 +119,13 @@ also works for testing):
 - **Maps JavaScript API** key, used by the browser (restrict it to your site's HTTP referrers).
 
 ```sh
-# 1. Add coordinates (one billed request per distinct address; re-run monthly)
+# 1. Add coordinates (Google bills per request; the script has a local 31-day limit)
 export GOOGLE_GEOCODING_API_KEY=...
-python3 geocode.py --dry-run     # how many addresses
-python3 geocode.py --limit 20    # small test
-python3 geocode.py               # all
+python3 geocode.py --dry-run                    # preview this batch
+python3 geocode.py --postal-prefix T2G --dry-run # preview only T2G
+python3 geocode.py --postal-prefix T2G          # geocode only T2G
+python3 geocode.py                              # next pending batch
+python3 geocode.py --history                    # run times and counts
 
 # 2. Run the app
 python3 -m venv .venv && .venv/bin/pip install -r web/requirements.txt
@@ -131,6 +133,16 @@ cd web
 GOOGLE_MAPS_BROWSER_KEY=... ../.venv/bin/uvicorn app:app --port 8000
 # open http://localhost:8000
 ```
+
+By default, the geocoder selects never-geocoded addresses first, then the oldest stale
+results, up to 9,900 locally tracked request attempts in any rolling 31-day window. Retries
+count toward that limit. Run timestamps, selected addresses, requests, and outcomes are
+recorded in `geocode_runs`; `--history` displays recent runs and this database's recent usage.
+
+This local guard cannot see usage from other projects or clients on the Google billing
+account, so it cannot guarantee a free bill. Google Geocoding results are only cached for
+up to 30 days; spreading a large dataset across batches does not let all coordinates remain
+current and available for free at once. Check Google Cloud billing before each batch.
 
 Optional: `GOOGLE_MAPS_MAP_ID` (a Map ID from the Google Cloud console; defaults to `DEMO_MAP_ID`)
 and `AHS_DB` (database path; defaults to `../ahs.db`).

@@ -12,10 +12,12 @@ default --max-age-days 30: re-run this monthly to stay within them.
 Usage:
   export GOOGLE_GEOCODING_API_KEY=...        # a key with the Geocoding API enabled
   python3 geocode.py --dry-run               # show how many addresses would be geocoded
-  python3 geocode.py --limit 20              # small test
-  python3 geocode.py                         # everything (asks for confirmation)
+  python3 geocode.py --postal-prefix T2G --dry-run
+  python3 geocode.py                         # process pending addresses within local request cap
+  python3 geocode.py --history               # show recent run history and local usage
 
-Only the Python standard library is used.
+The local request ledger limits this database to 9,900 attempts in any rolling 31-day
+window. It cannot account for usage by other projects or API clients on the same billing account.
 """
 import argparse
 import json
@@ -31,6 +33,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 
 URL = "https://maps.googleapis.com/maps/api/geocode/json"
+REQUEST_WINDOW_LIMIT = 9900
+REQUEST_WINDOW_DAYS = 31
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS geocodes (
@@ -43,11 +47,36 @@ CREATE TABLE IF NOT EXISTS geocodes (
     status TEXT,                   -- OK or ZERO_RESULTS
     geocoded_at TEXT
 );
+CREATE TABLE IF NOT EXISTS geocode_runs (
+    id INTEGER PRIMARY KEY,
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    postal_prefix TEXT,
+    addresses_selected INTEGER NOT NULL DEFAULT 0,
+    api_requests INTEGER NOT NULL DEFAULT 0,
+    ok_count INTEGER NOT NULL DEFAULT 0,
+    zero_results_count INTEGER NOT NULL DEFAULT 0,
+    error_count INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS geocode_request_attempts (
+    id INTEGER PRIMARY KEY,
+    run_id INTEGER REFERENCES geocode_runs(id),
+    address TEXT NOT NULL,
+    attempted_at TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('baseline', 'request'))
+);
+CREATE INDEX IF NOT EXISTS ix_geocode_attempts_time ON geocode_request_attempts(attempted_at);
+CREATE INDEX IF NOT EXISTS ix_geocode_attempts_address ON geocode_request_attempts(address, kind, attempted_at);
 """
 
 
 class Fatal(Exception):
     """Errors that won't fix themselves (bad key, API not enabled, billing off)."""
+
+
+class RequestWindowLimit(Exception):
+    """The local rolling request limit has been reached."""
 
 
 def log(*a):
@@ -58,10 +87,110 @@ def now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def request_window_start():
+    return (datetime.now(timezone.utc) - timedelta(days=REQUEST_WINDOW_DAYS)).isoformat(
+        timespec="seconds"
+    )
+
+
+def requests_in_window(db):
+    cutoff = request_window_start()
+    return db.execute(
+        "SELECT COUNT(*) FROM geocode_request_attempts WHERE attempted_at >= ?", (cutoff,)
+    ).fetchone()[0]
+
+
+def seed_usage_baseline(db):
+    cutoff = request_window_start()
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        db.execute("""
+            INSERT INTO geocode_request_attempts (address, attempted_at, kind)
+            SELECT g.address, g.geocoded_at, 'baseline'
+            FROM geocodes g
+            WHERE g.geocoded_at >= ?
+              AND NOT EXISTS (
+                  SELECT 1 FROM geocode_request_attempts a
+                  WHERE a.address = g.address AND a.kind = 'request'
+                    AND a.attempted_at <= g.geocoded_at
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM geocode_request_attempts a
+                  WHERE a.address = g.address AND a.kind = 'baseline'
+                    AND a.attempted_at = g.geocoded_at
+              )
+        """, (cutoff,))
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+
+def reserve_request(db, db_lock, run_id, address):
+    attempted_at = now()
+    cutoff = request_window_start()
+    with db_lock:
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            used = db.execute(
+                "SELECT COUNT(*) FROM geocode_request_attempts WHERE attempted_at >= ?",
+                (cutoff,),
+            ).fetchone()[0]
+            if used >= REQUEST_WINDOW_LIMIT:
+                raise RequestWindowLimit
+            db.execute(
+                """INSERT INTO geocode_request_attempts
+                   (run_id, address, attempted_at, kind) VALUES (?, ?, ?, 'request')""",
+                (run_id, address, attempted_at),
+            )
+            db.execute(
+                "UPDATE geocode_runs SET api_requests = api_requests + 1 WHERE id = ?", (run_id,)
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+
+def finish_run(db, run_id, status, counts=None):
+    counts = counts or {}
+    with db:
+        db.execute("""
+            UPDATE geocode_runs SET completed_at=?, status=?, ok_count=?,
+                zero_results_count=?, error_count=? WHERE id=?
+        """, (now(), status, counts.get("OK", 0), counts.get("ZERO_RESULTS", 0),
+              counts.get("error", 0), run_id))
+
+
+def show_history(db):
+    used = requests_in_window(db)
+    print(f"Rolling {REQUEST_WINDOW_DAYS}-day window: {used}/{REQUEST_WINDOW_LIMIT} "
+          f"locally tracked requests "
+          f"({max(0, REQUEST_WINDOW_LIMIT - used)} remaining)")
+    print("Run --dry-run or --history again later to check when capacity is available.")
+    runs = db.execute("""
+        SELECT id, started_at, completed_at, postal_prefix, addresses_selected,
+               api_requests, ok_count, zero_results_count, error_count, status
+        FROM geocode_runs ORDER BY id DESC LIMIT 20
+    """).fetchall()
+    if not runs:
+        print("No geocoding runs recorded.")
+        return
+    print("Recent runs (UTC):")
+    for row in runs:
+        run_id, started, completed, prefix, addresses, requests, ok, zero, errors, status = row
+        scope = f" postal_prefix={prefix}" if prefix else ""
+        print(f"  #{run_id} {started}–{completed or 'running'}{scope}: "
+              f"selected={addresses}, requests={requests}, ok={ok}, "
+              f"zero_results={zero}, errors={errors}, status={status}")
+
+
 class Geocoder:
-    def __init__(self, key, delay):
+    def __init__(self, key, delay, request_guard, stop):
         self.key = key
         self.delay = delay
+        self.request_guard = request_guard
+        self.stop = stop
         self._lock = threading.Lock()
         self._last = 0.0
 
@@ -80,7 +209,12 @@ class Geocoder:
             "components": "country:CA",
         })
         for attempt in range(6):
+            if self.stop.is_set():
+                return None
             self._throttle()
+            if self.stop.is_set():
+                return None
+            self.request_guard(address)
             try:
                 with urllib.request.urlopen(f"{URL}?{params}", timeout=30) as r:
                     data = json.loads(r.read())
@@ -104,15 +238,27 @@ class Geocoder:
         raise RuntimeError(f"gave up on address after retries: {address}")
 
 
-def pending_addresses(db, max_age_days):
+def pending_addresses(db, max_age_days, postal_prefix=None):
     cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat(timespec="seconds")
-    return [r[0] for r in db.execute("""
-        SELECT DISTINCT f.address FROM facilities f
-        LEFT JOIN geocodes g ON g.address = f.address
-        WHERE f.address IS NOT NULL AND f.address != ''
-          AND (g.address IS NULL OR g.geocoded_at < ?)
-        ORDER BY f.address
-    """, (cutoff,))]
+    query = """
+        SELECT address FROM (
+            SELECT DISTINCT f.address AS address, g.geocoded_at AS geocoded_at
+            FROM facilities f
+            LEFT JOIN geocodes g ON g.address = f.address
+            WHERE f.address IS NOT NULL AND f.address != ''
+              AND (g.address IS NULL OR g.geocoded_at < ?)
+    """
+    params = [cutoff]
+    if postal_prefix:
+        query += """
+              AND substr(upper(trim(f.postal_code)), 1, length(?)) = upper(?)
+        """
+        params.extend((postal_prefix, postal_prefix))
+    query += """
+        )
+        ORDER BY geocoded_at IS NOT NULL, geocoded_at, address
+    """
+    return [r[0] for r in db.execute(query, params)]
 
 
 def main():
@@ -121,38 +267,80 @@ def main():
     ap.add_argument("--key", default=os.environ.get("GOOGLE_GEOCODING_API_KEY"),
                     help="API key (default: $GOOGLE_GEOCODING_API_KEY)")
     ap.add_argument("--max-age-days", type=int, default=30, help="re-geocode entries older than this")
-    ap.add_argument("--limit", type=int, default=0, help="only geocode this many addresses")
+    ap.add_argument("--postal-prefix", help="only process facilities whose postal code starts with this")
+    ap.add_argument("--limit", type=int, default=0, help="process at most this many addresses in this run")
     ap.add_argument("--workers", type=int, default=5)
     ap.add_argument("--delay", type=float, default=0.05, help="min seconds between requests (0.05 = 20/s)")
     ap.add_argument("--dry-run", action="store_true", help="only show how many addresses need geocoding")
+    ap.add_argument("--history", action="store_true", help="show recent run history and rolling usage")
     ap.add_argument("--yes", action="store_true", help="don't ask for confirmation")
     args = ap.parse_args()
+    postal_prefix = args.postal_prefix.strip().upper() if args.postal_prefix else None
+    if args.postal_prefix is not None and not postal_prefix:
+        ap.error("--postal-prefix must not be empty")
+    if args.limit < 0:
+        ap.error("--limit cannot be negative")
 
     db = sqlite3.connect(args.db, check_same_thread=False)
     db.executescript(SCHEMA)
-    todo = pending_addresses(db, args.max_age_days)
-    if args.limit:
-        todo = todo[:args.limit]
-    total_fac = db.execute("SELECT COUNT(*) FROM facilities").fetchone()[0]
-    log(f"{total_fac} facilities; {len(todo)} addresses to geocode (1 Google request each)")
-    if args.dry_run or not todo:
+    seed_usage_baseline(db)
+    if args.history:
+        show_history(db)
+        return
+
+    used = requests_in_window(db)
+    remaining = max(0, REQUEST_WINDOW_LIMIT - used)
+    pending = pending_addresses(db, args.max_age_days, postal_prefix)
+    batch_limit = min(remaining, args.limit) if args.limit else remaining
+    todo = pending[:batch_limit]
+    facility_query = "SELECT COUNT(*) FROM facilities"
+    facility_params = ()
+    if postal_prefix:
+        facility_query += """
+            WHERE substr(upper(trim(postal_code)), 1, length(?)) = upper(?)
+        """
+        facility_params = (postal_prefix, postal_prefix)
+    total_fac = db.execute(facility_query, facility_params).fetchone()[0]
+    scope = f" with postal prefix {postal_prefix}" if postal_prefix else ""
+    log(f"{total_fac} facilities{scope}; {len(pending)} pending addresses; selecting {len(todo)} "
+        f"within rolling {REQUEST_WINDOW_DAYS}-day usage {used}/{REQUEST_WINDOW_LIMIT}")
+    with db:
+        run_id = db.execute("""
+            INSERT INTO geocode_runs (started_at, postal_prefix, addresses_selected, status)
+            VALUES (?, ?, ?, 'running')
+        """, (now(), postal_prefix, len(todo))).lastrowid
+    if args.dry_run:
+        finish_run(db, run_id, "dry_run")
+        return
+    if not todo:
+        status = "request_window_cap_reached" if pending and remaining == 0 else "no_work"
+        finish_run(db, run_id, status)
         return
     if not args.key:
+        finish_run(db, run_id, "missing_api_key")
         sys.exit("No API key: set GOOGLE_GEOCODING_API_KEY or pass --key")
-    if not args.yes and not args.limit:
-        if input(f"Send {len(todo)} requests to the Google Geocoding API (billed)? [y/N] ").strip().lower() != "y":
+    if not args.yes:
+        if input(f"Send geocoding requests for up to {len(todo)} addresses? "
+                 f"Retries count against the local {REQUEST_WINDOW_DAYS}-day limit. [y/N] ").strip().lower() != "y":
+            finish_run(db, run_id, "cancelled")
             return
 
-    geo = Geocoder(args.key, args.delay)
-    wlock = threading.Lock()
+    db_lock = threading.Lock()
     stop = threading.Event()
     counts = {"OK": 0, "ZERO_RESULTS": 0, "error": 0}
+    geo = Geocoder(args.key, args.delay,
+                   lambda address: reserve_request(db, db_lock, run_id, address), stop)
+    quota_reached = False
+    fatal_error = False
+    interrupted = False
 
     def work(address):
         if stop.is_set():
             return
         res = geo.geocode(address)
-        with wlock, db:
+        if res is None:
+            return
+        with db_lock, db:
             db.execute("INSERT OR REPLACE INTO geocodes VALUES (?,?,?,?,?,?,?,?)",
                        (address, res[1], res[2], res[3], res[4], res[5], res[0], now()))
             counts[res[0]] += 1
@@ -164,10 +352,16 @@ def main():
         for f in as_completed(futs):
             try:
                 f.result()
+            except RequestWindowLimit:
+                quota_reached = True
+                stop.set()
+                log(f"Local {REQUEST_WINDOW_DAYS}-day request cap reached "
+                    f"({REQUEST_WINDOW_LIMIT}); stopping.")
             except Fatal as e:
+                fatal_error = True
+                counts["error"] += 1
                 stop.set()
                 log(f"Google refused the request, stopping: {e}")
-                break
             except Exception as e:
                 counts["error"] += 1
                 log(f"  error for {futs[f]!r}: {e}")
@@ -175,13 +369,34 @@ def main():
             if done % 500 == 0 or done == len(todo):
                 log(f"{done}/{len(todo)}  ok={counts['OK']} not_found={counts['ZERO_RESULTS']} errors={counts['error']}")
     except KeyboardInterrupt:
+        interrupted = True
+        stop.set()
         log("Interrupted — results so far are saved; re-run to continue.")
     finally:
         stop.set()
-        ex.shutdown(wait=False, cancel_futures=True)
+        ex.shutdown(wait=True, cancel_futures=True)
 
-    mapped = db.execute("""SELECT COUNT(*) FROM facilities f JOIN geocodes g
-                           ON g.address = f.address AND g.status = 'OK'""").fetchone()[0]
+    if interrupted:
+        run_status = "interrupted"
+    elif fatal_error:
+        run_status = "stopped_on_api_error"
+    elif quota_reached:
+        run_status = "request_window_cap_reached"
+    elif counts["error"]:
+        run_status = "completed_with_errors"
+    else:
+        run_status = "completed"
+    finish_run(db, run_id, run_status, counts)
+
+    mapped_query = """SELECT COUNT(*) FROM facilities f JOIN geocodes g
+                      ON g.address = f.address AND g.status = 'OK'"""
+    mapped_params = ()
+    if postal_prefix:
+        mapped_query += """
+            WHERE substr(upper(trim(f.postal_code)), 1, length(?)) = upper(?)
+        """
+        mapped_params = (postal_prefix, postal_prefix)
+    mapped = db.execute(mapped_query, mapped_params).fetchone()[0]
     log(f"facilities with coordinates: {mapped}/{total_fac}")
 
 
