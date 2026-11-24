@@ -61,14 +61,17 @@ window.initMap = async function () {
   const dotTemplate = document.createElement("div");
   dotTemplate.className = "dot";
   state.markers = state.facilities.map((f) => {
+    f.lat = Number(f.lat);
+    f.lng = Number(f.lng);
     f.status = statusOf(f);
+    if (!Number.isFinite(f.lat) || !Number.isFinite(f.lng)) return null;
     const dot = dotTemplate.cloneNode();
     dot.style.background = STATUS[f.status].color;
     const m = new AdvancedMarkerElement({ position: { lat: f.lat, lng: f.lng }, content: dot, title: f.name });
     m.addListener("click", () => openFacility(f, m));
     m.facility = f;
     return m;
-  });
+  }).filter(Boolean);
 
   clusterer = new markerClusterer.MarkerClusterer({ map, markers: [] });
   applyFilters();

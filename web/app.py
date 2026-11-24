@@ -63,8 +63,17 @@ def facilities():
         if not has_table(con, "geocodes"):
             return {"fields": FACILITY_FIELDS, "rows": [], "total": total, "unmapped": total}
         rows = con.execute("""
-            WITH latest AS (            -- most recent inspection per facility
-                SELECT facility_id, id, MAX(inspection_date) AS d FROM inspections GROUP BY facility_id
+            WITH latest AS (
+                SELECT facility_id, id
+                FROM (
+                    SELECT facility_id, id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY facility_id
+                               ORDER BY inspection_date DESC, id DESC
+                           ) AS rn
+                    FROM inspections
+                )
+                WHERE rn = 1
             ),
             vcount AS (
                 SELECT inspection_id, COUNT(*) AS n, SUM(critical = 'Yes') AS crit
@@ -76,11 +85,14 @@ def facilities():
                 FROM inspections i LEFT JOIN vcount vc ON vc.inspection_id = i.id
                 GROUP BY i.facility_id
             )
-            SELECT f.id, f.name, f.facility_group, g.lat, g.lng, f.city, f.last_inspection_date,
+            SELECT f.id, f.name, f.facility_group AS type, g.lat, g.lng, f.city, f.last_inspection_date,
                    COALESCE(lv.n, 0), COALESCE(lv.crit, 0),
                    COALESCE(t.n, 0), COALESCE(t.crit, 0), COALESCE(t.inspections, 0)
             FROM facilities f
-            JOIN geocodes g ON g.address = f.address AND g.status = 'OK'
+            JOIN geocodes g ON g.address = f.address
+                           AND g.status = 'OK'
+                           AND g.lat IS NOT NULL
+                           AND g.lng IS NOT NULL
             LEFT JOIN latest l ON l.facility_id = f.id
             LEFT JOIN vcount lv ON lv.inspection_id = l.id
             LEFT JOIN totals t ON t.facility_id = f.id
