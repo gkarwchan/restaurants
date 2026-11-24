@@ -5,6 +5,7 @@ __pycache__/
 web/ahs.*
 ahs.db-wal
 ahs.db-shm
+geocoding_data
 # C extensions
 *.so
 # Distribution / packaging
