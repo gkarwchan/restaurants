@@ -159,6 +159,18 @@ and `AHS_DB` (database path; defaults to `../ahs.db`).
 Marker colours show the result of each facility's latest inspection: red = critical violation,
 orange = violation, green = none, grey = no inspection data yet.
 
+## Deploy the map web app to Cloud Run
+
+Run `./deploy-web.sh` from the repository. It uses `GOOGLE_MAPS_BROWSER_KEY` from the current
+environment, or loads it from `~/.zshrc` with zsh if it is not already set. It deploys the
+public `ahs-map` service to `northamerica-northeast2` using the active `gcloud` project,
+enabling the required Cloud Run and build APIs. Set `PROJECT`, `REGION`, or `SERVICE` to
+override those defaults. Set `GOOGLE_MAPS_MAP_ID` optionally to use a Maps Map ID.
+
+The script snapshots `AHS_DB` (or the repository's `ahs.db`) into the ignored `web/ahs.db`
+before deploying, so it can safely snapshot a database that uses WAL. Restrict the browser
+key to your website's HTTP referrers and the Maps JavaScript API in Google Cloud.
+
 ## Run the downloader on Google Cloud Run (as a Job)
 
 ```sh
