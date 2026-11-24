@@ -3,6 +3,8 @@ __pycache__/
 *.py[codz]
 *$py.class
 web/ahs.*
+ahs.db-wal
+ahs.db-shm
 # C extensions
 *.so
 # Distribution / packaging
