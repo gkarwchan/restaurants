@@ -73,7 +73,26 @@ window.initMap = async function () {
     return m;
   }).filter(Boolean);
 
-  clusterer = new markerClusterer.MarkerClusterer({ map, markers: [] });
+  const clusterRenderer = {
+    render({ count, position }, _stats, rendererMap) {
+      const svg = `<svg fill="#0000ff" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="50" height="50">
+<circle cx="120" cy="120" opacity=".6" r="70" />
+<circle cx="120" cy="120" opacity=".3" r="90" />
+<circle cx="120" cy="120" opacity=".2" r="110" />
+<text x="50%" y="50%" style="fill:#fff" text-anchor="middle" font-size="50" dominant-baseline="middle" font-family="roboto,arial,sans-serif">${count}</text>
+</svg>`;
+      const content = new DOMParser().parseFromString(svg, "image/svg+xml").documentElement;
+      content.setAttribute("transform", "translate(0 25)");
+      return new AdvancedMarkerElement({
+        map: rendererMap,
+        position,
+        content,
+        title: `Cluster of ${count} facilities`,
+        zIndex: Number(google.maps.Marker.MAX_ZINDEX) + count,
+      });
+    },
+  };
+  clusterer = new markerClusterer.MarkerClusterer({ map, markers: [], renderer: clusterRenderer });
   applyFilters();
 };
 

@@ -119,7 +119,11 @@ also works for testing):
 - **Maps JavaScript API** key, used by the browser (restrict it to your site's HTTP referrers).
 
 ```sh
-# 1. Add coordinates (Google bills per request; the script has a local 31-day limit)
+# 1. Add available local coordinates without Google API calls
+python3 geocode_local.py --dry-run
+python3 geocode_local.py
+
+# 2. Geocode remaining addresses (Google bills per request; local results are retained)
 export GOOGLE_GEOCODING_API_KEY=...
 python3 geocode.py --dry-run                    # preview this batch
 python3 geocode.py --postal-prefix T2G --dry-run # preview only T2G
@@ -127,17 +131,22 @@ python3 geocode.py --postal-prefix T2G          # geocode only T2G
 python3 geocode.py                              # next pending batch
 python3 geocode.py --history                    # run times and counts
 
-# 2. Run the app
+# 3. Run the app
 python3 -m venv .venv && .venv/bin/pip install -r web/requirements.txt
 cd web
 GOOGLE_MAPS_BROWSER_KEY=... ../.venv/bin/uvicorn app:app --port 8000
 # open http://localhost:8000
 ```
 
-By default, the geocoder selects never-geocoded addresses first, then the oldest stale
-results, up to 9,900 locally tracked request attempts in any rolling 31-day window. Retries
-count toward that limit. Run timestamps, selected addresses, requests, and outcomes are
-recorded in `geocode_runs`; `--history` displays recent runs and this database's recent usage.
+The Google geocoder selects addresses with no geocode row first, then the oldest stale
+Google results, up to 9,900 locally tracked request attempts in any rolling 31-day window.
+Retries count toward that limit. Run timestamps, selected addresses, requests, and outcomes
+are recorded in `geocode_runs`; `--history` displays recent runs and this database's recent usage.
+The local importer prefers Calgary, then Edmonton, then the province-wide municipal address
+DBFs (`address.dbf` and `address_1.dbf`), and Alberta ODA points last. It imports only
+unambiguous matches, never replaces existing geocode rows, and tags imported coordinates by
+source. Google refreshes continue to apply only to Google-sourced rows. Override the municipal
+data directory with `--full-municipality-dir`.
 
 This local guard cannot see usage from other projects or clients on the Google billing
 account, so it cannot guarantee a free bill. Google Geocoding results are only cached for

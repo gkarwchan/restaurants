@@ -45,7 +45,8 @@ CREATE TABLE IF NOT EXISTS geocodes (
     location_type TEXT,            -- ROOFTOP, RANGE_INTERPOLATED, GEOMETRIC_CENTER, APPROXIMATE
     formatted_address TEXT,
     status TEXT,                   -- OK or ZERO_RESULTS
-    geocoded_at TEXT
+    geocoded_at TEXT,
+    source TEXT NOT NULL DEFAULT 'google'
 );
 CREATE TABLE IF NOT EXISTS geocode_runs (
     id INTEGER PRIMARY KEY,
@@ -69,6 +70,16 @@ CREATE TABLE IF NOT EXISTS geocode_request_attempts (
 CREATE INDEX IF NOT EXISTS ix_geocode_attempts_time ON geocode_request_attempts(attempted_at);
 CREATE INDEX IF NOT EXISTS ix_geocode_attempts_address ON geocode_request_attempts(address, kind, attempted_at);
 """
+
+
+def ensure_schema(db):
+    db.executescript(SCHEMA)
+    columns = {row[1] for row in db.execute("PRAGMA table_info(geocodes)")}
+    if "source" not in columns:
+        db.execute(
+            "ALTER TABLE geocodes ADD COLUMN source TEXT NOT NULL DEFAULT 'google'"
+        )
+    db.commit()
 
 
 class Fatal(Exception):
@@ -109,6 +120,7 @@ def seed_usage_baseline(db):
             SELECT g.address, g.geocoded_at, 'baseline'
             FROM geocodes g
             WHERE g.geocoded_at >= ?
+              AND COALESCE(g.source, 'google') = 'google'
               AND NOT EXISTS (
                   SELECT 1 FROM geocode_request_attempts a
                   WHERE a.address = g.address AND a.kind = 'request'
@@ -246,7 +258,13 @@ def pending_addresses(db, max_age_days, postal_prefix=None):
             FROM facilities f
             LEFT JOIN geocodes g ON g.address = f.address
             WHERE f.address IS NOT NULL AND f.address != ''
-              AND (g.address IS NULL OR g.geocoded_at < ?)
+              AND (
+                  g.address IS NULL
+                  OR (
+                      COALESCE(g.source, 'google') = 'google'
+                      AND g.geocoded_at < ?
+                  )
+              )
     """
     params = [cutoff]
     if postal_prefix:
@@ -282,7 +300,7 @@ def main():
         ap.error("--limit cannot be negative")
 
     db = sqlite3.connect(args.db, check_same_thread=False)
-    db.executescript(SCHEMA)
+    ensure_schema(db)
     seed_usage_baseline(db)
     if args.history:
         show_history(db)
@@ -341,8 +359,12 @@ def main():
         if res is None:
             return
         with db_lock, db:
-            db.execute("INSERT OR REPLACE INTO geocodes VALUES (?,?,?,?,?,?,?,?)",
-                       (address, res[1], res[2], res[3], res[4], res[5], res[0], now()))
+            db.execute("""
+                INSERT OR REPLACE INTO geocodes
+                    (address, lat, lng, place_id, location_type, formatted_address,
+                     status, geocoded_at, source)
+                VALUES (?,?,?,?,?,?,?,?, 'google')
+            """, (address, res[1], res[2], res[3], res[4], res[5], res[0], now()))
             counts[res[0]] += 1
 
     ex = ThreadPoolExecutor(max_workers=args.workers)
