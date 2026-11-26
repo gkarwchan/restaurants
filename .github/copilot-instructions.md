@@ -6,11 +6,34 @@ This repository downloads Alberta Health Services inspection data and displays i
 
 - `ahs_scraper.py` is the standalone downloader. It uses only the Python standard library and writes `facilities`, `inspections`, and `violations` tables to SQLite.
 - `geocode.py` enriches facilities with coordinates in `geocodes` and maintains geocoding run/request history in the SQLite database.
+- `geocode_local.py` imports locally sourced address coordinates into `geocodes` without calling Google.
+- `place_matcher.py` looks up Google Place IDs and stores results separately in `google_places`, keyed by facility ID.
 - `cloud_run.py` adapts the downloader for a Google Cloud Run Job: restore/upload SQLite snapshots to Cloud Storage, run the scraper, optionally geocode, and upload a final snapshot.
 - `web/app.py` is a read-only FastAPI app that serves compact facility data and facility detail records from SQLite.
 - `web/static/` contains the browser-only Google Maps UI. Facility filtering and marker rendering are in `app.js`.
 
 The SQLite database is the integration boundary. The downloader, geocoder, web app, and Cloud Run entrypoint may all operate on the same `ahs.db`; normal `open_db()`/geocoder usage enables WAL mode, while the web app opens it read-only.
+
+## Database structure and data flow
+
+`ahs.db` is a SQLite database. Keep these tables and relationships as the contract between scripts:
+
+- `facilities` — one AHS facility per row. `id` is the text primary key. The scraper stores normalized fields such as `name`, `facility_group`, `community`, `address_line1`, `city`, `province`, `postal_code`, `country`, combined `address`, `last_inspection_date`, `status`, `detail_url`, and raw source JSON. `listed_at` and `inspections_fetched_at` track scraper progress.
+- `inspections` — one inspection per row. `id` is the text primary key; `facility_id` references `facilities.id`. Stores the inspection number, normalized ISO date, displayed date, type, action taken, raw JSON, and `violations_fetched_at`.
+- `violations` — one violation per row. `inspection_id` references `inspections.id`; stores category/question, critical flag, status, comments, inspector comment, and raw JSON.
+- `meta` — scraper key/value state, including the next facility-grid page.
+- `geocodes` — one coordinate result per exact `facilities.address`, keyed by `address`. Includes latitude/longitude, Google Place ID (when available), formatted address, result status, timestamp, and source (`google` or a local importer).
+- `geocode_runs` and `geocode_request_attempts` — run summaries and the local rolling request ledger used by `geocode.py`.
+- `google_places` — one Places match record per AHS facility. `facilityId` is the primary key and references `facilities.id`; `place_id`, `match_status`, and `candidate_ids` are stored here, not on `facilities`. Multiple candidates are serialized as a JSON array. `place_matcher.py` creates this table and, when migrating an older database, transfers any legacy match values from `facilities` before dropping those old columns.
+
+Population/enrichment flow:
+
+1. `ahs_scraper.py` downloads facilities, then inspections keyed by facility ID, then violations keyed by inspection ID. Completion markers and conflict handling make normal reruns resumable; `--refresh` explicitly re-fetches completed inspection/violation data.
+2. `geocode_local.py` imports local municipal/ODA coordinates; `geocode.py` geocodes remaining or stale addresses using the Google Geocoding API. Both use `geocodes`.
+3. `place_matcher.py` separately searches Google Places (New), requesting only `places.id`, for pending facilities and writes results to `google_places`. It is not currently invoked by `cloud_run.py`.
+4. `cloud_run.py` restores/uploads consistent SQLite snapshots, runs `ahs_scraper.py`, and optionally runs `geocode.py` when `GOOGLE_GEOCODING_API_KEY` is configured. The web app reads the database and does not populate it.
+
+`place_matcher.py` defaults to `ahs.db`; `DATABASE_URL` may override it with a SQLite path or SQLite URL. It uses `GOOGLE_GEOCODING_API_KEY` for the Places API request, so that key must also have Places API (New) enabled. Its per-record commits and non-NULL status rows make runs resumable.
 
 ## Map app details
 
@@ -87,7 +110,7 @@ cp ahs.db web/ahs.db
 docker build -t ahs-web web/
 ```
 
-There is currently no test suite, lint configuration, or package script. There is no `pytest` dependency or single-test selector. For downloader changes, use `python3 ahs_scraper.py --limit N` or the narrowest `--phase`; for geocoder selection changes, use `python3 geocode.py --dry-run` (never use a live run as a harmless test). For web changes, start the app with `./run-web.sh` and check `http://127.0.0.1:8000/`, `/config.js`, `/api/facilities`, and a facility detail route in a browser or with `curl`. API routes read the actual SQLite schema and data, so use a representative local database.
+The standard-library tests live under `tests/`; run them with `python3 -m unittest discover -s tests`. There is no `pytest` dependency, lint configuration, or package script. For downloader changes, use `python3 ahs_scraper.py --limit N` or the narrowest `--phase`; for geocoder selection changes, use `python3 geocode.py --dry-run` (never use a live run as a harmless test). For web changes, start the app with `./run-web.sh` and check `http://127.0.0.1:8000/`, `/config.js`, `/api/facilities`, and a facility detail route in a browser or with `curl`. API routes read the actual SQLite schema and data, so use a representative local database.
 
 For interactive browser checks, the repository `.mcp.json` configures the Playwright MCP server for Copilot CLI. It uses `npx` and requires Node.js 20+; after changing MCP config, reload the Copilot CLI session. The CLI loads `.mcp.json` only from a trusted workspace.
 
@@ -114,7 +137,23 @@ Use existing SQLite tables and SQL shape as the contract between these component
 - `/api/facilities` deliberately sends column-oriented compact rows for scale. If its result shape or `FACILITY_FIELDS` changes, update the `app.js` row-to-object mapping in the same change.
 - Geocodes are keyed by the exact `facilities.address` value, so address normalization changes must be consistent across lookup and persistence. The `--dry-run` and `--history` modes report locally tracked usage; a `--yes` live run may incur Google API charges, and the local quota ledger cannot see usage from other projects or clients.
 - Cloud Run restores the configured GCS object before scraping and uploads SQLite backup snapshots periodically and at completion. `GOOGLE_GEOCODING_API_KEY` enables geocoding after scraping; without it, the job only updates inspection data.
-- The API key values are supplied at runtime: `GOOGLE_MAPS_BROWSER_KEY` is sent to the browser through `/config.js`, whereas `GOOGLE_GEOCODING_API_KEY` is used server-side by `geocode.py`. Never put either key in source, instruction files, or browser code.
-- Environment variables: `GOOGLE_MAPS_BROWSER_KEY`, `GOOGLE_MAPS_MAP_ID`, `AHS_DB`, `GOOGLE_GEOCODING_API_KEY`, `GCS_BUCKET`, `GCS_OBJECT`, `DB_PATH`, and `UPLOAD_EVERY_MIN`. Keep real API keys and credentials out of tracked files.
+- The API key values are supplied at runtime: `GOOGLE_MAPS_BROWSER_KEY` is sent to the browser through `/config.js`, whereas `GOOGLE_GEOCODING_API_KEY` is used server-side by `geocode.py` and `place_matcher.py`. The key used by `place_matcher.py` must have Places API (New) enabled. Never put real keys in source, instruction files, or browser code.
+- Environment variables: `GOOGLE_MAPS_BROWSER_KEY`, `GOOGLE_MAPS_MAP_ID`, `AHS_DB`, `DATABASE_URL` (SQLite override for `place_matcher.py`), `GOOGLE_GEOCODING_API_KEY`, `GCS_BUCKET`, `GCS_OBJECT`, `DB_PATH`, and `UPLOAD_EVERY_MIN`. Keep real API keys and credentials out of tracked files.
 - `ahs.db` is Git LFS-managed. A missing or pointer-only database should be restored with `git lfs pull`; when copying a live database, include `ahs.db-wal` if it exists and stop the writer first.
 - Do not run multiple downloader processes against the same database or Cloud Storage object. Keep Cloud Run jobs at one task because SQLite is single-file and shared state cannot be partitioned safely.
+
+## Git LFS database file
+
+`.gitattributes` contains `ahs.db filter=lfs diff=lfs merge=lfs -text`, so Git stores a small LFS pointer in the repository while the database binary is stored as a Git LFS object. Commit `3c7d64b` (`track db file`) added this rule and the database to LFS. `git lfs ls-files` lists the tracked database; `git lfs pull` downloads its object when a checkout has only the pointer.
+
+The original setup used Git LFS tracking, then staged both the attributes rule and database so Git's LFS filter uploaded the binary object:
+
+```sh
+git lfs install
+git lfs track ahs.db
+git add .gitattributes ahs.db
+git commit -m "Track database with Git LFS"
+git push
+```
+
+The SQLite `-wal` and `-shm` sidecars are ignored and are not the versioned database snapshot. Stop writers before copying or committing a database; use SQLite's backup API for a consistent snapshot rather than copying the main file while it is being written. Stage the changed `ahs.db` normally with Git after the LFS rule is in place; the LFS filter handles the binary object.

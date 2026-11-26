@@ -22,6 +22,11 @@
 
   <main class="layout">
     <div id="map" role="application" aria-label="Map of facilities"></div>
+    <div id="map-message" class="map-message" role="status" aria-live="polite" hidden></div>
+    <div id="loading" class="loading" role="status" aria-live="polite">
+      <span class="spinner" aria-hidden="true"></span>
+      <span>Loading facility data…</span>
+    </div>
     <div class="legend" id="legend"></div>
     <aside id="panel" class="panel" hidden>
       <button id="close" class="close" aria-label="Close">×</button>

@@ -34,6 +34,7 @@ function loadGoogleMaps() {
   const { mapsKey } = window.APP_CONFIG || {};
   if (!mapsKey) {
     $("map").innerHTML = '<div class="notice">Set the <code>GOOGLE_MAPS_BROWSER_KEY</code> environment variable and restart the server to show the map.</div>';
+    $("loading").hidden = true;
     return;
   }
   const params = new URLSearchParams({
@@ -42,7 +43,10 @@ function loadGoogleMaps() {
   const s = document.createElement("script");
   s.src = "https://maps.googleapis.com/maps/api/js?" + params;
   s.async = true;
-  s.onerror = () => { $("map").innerHTML = '<div class="notice">Google Maps failed to load.</div>'; };
+  s.onerror = () => {
+    $("map").innerHTML = '<div class="notice">Google Maps failed to load.</div>';
+    $("loading").hidden = true;
+  };
   document.head.appendChild(s);
 }
 
@@ -52,9 +56,55 @@ window.initMap = async function () {
   map = new Map($("map"), {
     center: CALGARY, zoom: 10, mapId: window.APP_CONFIG.mapId,
     mapTypeControl: false, streetViewControl: false, clickableIcons: false,
+    zoomControl: true,
   });
+  const locateButton = document.createElement("button");
+  locateButton.type = "button";
+  locateButton.className = "locate-control";
+  locateButton.setAttribute("aria-label", "Find my location");
+  locateButton.title = "Find my location";
+  locateButton.innerHTML = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><circle cx="12" cy="12" r="7" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="2" fill="currentColor"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3" stroke="currentColor" stroke-width="2"/></svg>';
+  locateButton.addEventListener("click", () => {
+    const message = $("map-message");
+    message.hidden = true;
+    if (!navigator.geolocation) {
+      message.textContent = "Location is not available in this browser.";
+      message.hidden = false;
+      return;
+    }
 
-  const data = await fetch("/api/facilities").then((r) => r.json());
+    locateButton.disabled = true;
+    navigator.geolocation.getCurrentPosition(
+      ({ coords }) => {
+        map.panTo({ lat: coords.latitude, lng: coords.longitude });
+        map.setZoom(15);
+        locateButton.disabled = false;
+      },
+      (error) => {
+        message.textContent = error.code === error.PERMISSION_DENIED
+          ? "Location access was denied. Allow it in your browser and try again."
+          : error.code === error.TIMEOUT
+            ? "Location request timed out. Please try again."
+            : "Could not determine your location. Please try again.";
+        message.hidden = false;
+        locateButton.disabled = false;
+      },
+      { enableHighAccuracy: true, timeout: 10000 },
+    );
+  });
+  map.controls[google.maps.ControlPosition.RIGHT_TOP].push(locateButton);
+
+  let data;
+  try {
+    const response = await fetch("/api/facilities");
+    if (!response.ok) throw new Error(`Facilities request failed (${response.status})`);
+    data = await response.json();
+  } catch (error) {
+    console.error("Could not load facility data:", error);
+    $("map").innerHTML = '<div class="notice">Facility data could not be loaded. Please reload the page.</div>';
+    $("loading").hidden = true;
+    return;
+  }
   state.facilities = data.rows.map((row) => Object.fromEntries(data.fields.map((k, i) => [k, row[i]])));
   state.unmapped = data.unmapped;
 
@@ -94,6 +144,7 @@ window.initMap = async function () {
   };
   clusterer = new markerClusterer.MarkerClusterer({ map, markers: [], renderer: clusterRenderer });
   applyFilters();
+  $("loading").hidden = true;
 };
 
 // ---------------------------------------------------------------- filters
