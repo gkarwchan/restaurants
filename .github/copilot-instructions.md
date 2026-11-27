@@ -39,6 +39,9 @@ Population/enrichment flow:
 
 - `web/app.py` serves `/` and a runtime-generated `/config.js`; the latter exposes the browser Maps key and Map ID, not the geocoding key.
 - The browser fetches `/api/facilities` once, builds map markers from the compact response, and fetches `/api/facilities/{facility_id}` when a marker is selected. Keep this contract aligned with `web/static/app.js`.
+- `/api/facilities` includes `hasPlaceInfo`, derived from a non-NULL `google_places.place_id`; the matching compact field and marker behavior must stay in sync. Markers preserve their inspection-status color and use a small information badge plus legend entry when Places details are available.
+- The AHS detail panel shows “More info” only when its facility has a saved Place ID. This opens a browser dialog populated from `/api/facilities/{facility_id}/place`; its photo is proxied through `/api/facilities/{facility_id}/place/photo` so the Google Places key stays server-side. The popup displays available place details and photo author attribution.
+- These Places endpoints use `GOOGLE_GEOCODING_API_KEY` server-side and require Places API (New) enabled. Do not expose this key in `/config.js` or browser code. Missing `google_places` tables or unmatched facilities should continue to omit the link and badge rather than break the map.
 - The map uses the Maps JavaScript API's `maps` and `marker` libraries, advanced markers, and the marker-clusterer script loaded from `unpkg.com` in `web/static/index.html`.
 - A map can run without coordinates or a browser key, but it will have no mapped facilities or show the key setup notice. Geocoding and map display use distinct Google API keys and credentials.
 
@@ -120,8 +123,8 @@ For interactive browser checks, the repository `.mcp.json` configures the Playwr
 2. Inspection fetches are keyed by `facilities.id`; violation fetches are keyed by `inspections.id`.
 3. Raw endpoint payloads are retained in `raw_json` columns while normalized fields are stored in dedicated columns.
 4. `geocode.py` caches one coordinate record per distinct `facilities.address` in `geocodes`.
-5. `/api/facilities` joins facilities to successful geocodes and performs latest-inspection and violation aggregates in SQL. Its JSON shape is a compact `fields`/`rows` pair consumed by `web/static/app.js`.
-6. `/api/facilities/{facility_id}` supplies the detail panel and all retained inspections and violations for one facility.
+5. `/api/facilities` joins facilities to successful geocodes and performs latest-inspection and violation aggregates in SQL. Its JSON shape is a compact `fields`/`rows` pair consumed by `web/static/app.js`, including a `hasPlaceInfo` flag from `google_places`.
+6. `/api/facilities/{facility_id}` supplies the detail panel, saved Place ID availability, and all retained inspections and violations for one facility. The Places detail and photo endpoints use that saved Place ID to proxy Google Places API (New) data without exposing the server key to the browser.
 
 Use existing SQLite tables and SQL shape as the contract between these components. Do not add a separate ORM or service layer unless the task explicitly requires it.
 
