@@ -112,10 +112,11 @@ Don't run the scraper on two machines at once.
 
 ## Map web app
 
-Needs `ahs.db` with coordinates, plus two Google Maps Platform API keys (one key with both APIs
+Needs `ahs.db` with coordinates, plus Google Maps Platform API keys (one key with all APIs
 also works for testing):
 
-- **Geocoding API** key, used once by `geocode.py` (restrict it to the Geocoding API).
+- **Geocoding API** key, used by `geocode.py` and for Google Places detail/photo lookups. Enable
+  Places API (New) on this key to show the “More info” popup.
 - **Maps JavaScript API** key, used by the browser (restrict it to your site's HTTP referrers).
 
 ```sh
@@ -134,7 +135,7 @@ python3 geocode.py --history                    # run times and counts
 # 3. Run the app
 python3 -m venv .venv && .venv/bin/pip install -r web/requirements.txt
 cd web
-GOOGLE_MAPS_BROWSER_KEY=... ../.venv/bin/uvicorn app:app --port 8000
+GOOGLE_MAPS_BROWSER_KEY=... GOOGLE_GEOCODING_API_KEY=... ../.venv/bin/uvicorn app:app --port 8000
 # open http://localhost:8000
 ```
 
@@ -165,7 +166,8 @@ Run `./deploy-web.sh` from the repository. It uses `GOOGLE_MAPS_BROWSER_KEY` fro
 environment, or loads it from `~/.zshrc` with zsh if it is not already set. It deploys the
 public `ahs-map` service to `northamerica-northeast2` using the active `gcloud` project,
 enabling the required Cloud Run and build APIs. Set `PROJECT`, `REGION`, or `SERVICE` to
-override those defaults. Set `GOOGLE_MAPS_MAP_ID` optionally to use a Maps Map ID.
+override those defaults. Set `GOOGLE_MAPS_MAP_ID` optionally to use a Maps Map ID. Set
+`GOOGLE_GEOCODING_API_KEY` when deploying to enable the Google Places “More info” popup.
 
 The script snapshots `AHS_DB` (or the repository's `ahs.db`) into the ignored `web/ahs.db`
 before deploying, so it can safely snapshot a database that uses WAL. Restrict the browser

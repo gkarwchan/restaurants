@@ -84,10 +84,18 @@ body {
 }
 .legend div { display: flex; align-items: center; gap: 6px; }
 .dot {
+  position: relative;
   width: 14px; height: 14px; border-radius: 50%;
   border: 2px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.35);
 }
+.dot.has-place-info::after {
+  content: "i"; position: absolute; top: -6px; right: -7px; z-index: 1;
+  width: 9px; height: 9px; border: 1px solid #fff; border-radius: 50%;
+  background: #1a73e8; color: #fff; font: bold 7px/8px Arial, sans-serif;
+  text-align: center; box-shadow: 0 0 0 1px rgba(0,0,0,.35);
+}
 .legend .dot { width: 10px; height: 10px; border-width: 1px; }
+.legend .places-legend-dot { background: #80868b; }
 
 .panel {
   width: 420px; max-width: 100%; overflow-y: auto; position: relative;
@@ -100,6 +108,19 @@ body {
 .panel h2 { font-size: 18px; margin: 0 28px 4px 0; }
 .meta { color: var(--muted); margin-bottom: 8px; }
 .panel a { color: var(--accent); }
+.place-dialog {
+  width: min(520px, calc(100% - 32px)); max-height: min(80vh, 760px); overflow-y: auto;
+  border: 1px solid var(--line); border-radius: 12px; padding: 20px;
+  background: var(--bg); color: var(--fg); box-shadow: 0 8px 32px rgba(0,0,0,.3);
+}
+.place-dialog::backdrop { background: rgba(0,0,0,.45); }
+.place-dialog h2 { font-size: 20px; margin: 0 32px 12px 0; }
+.place-dialog a { color: var(--accent); }
+.place-dialog .close { position: sticky; float: right; top: 0; margin: -8px -8px 0 0; }
+.place-photo { display: block; max-width: 100%; max-height: 340px; margin: 0 auto; border-radius: 8px; object-fit: cover; }
+.photo-attribution { color: var(--muted); font-size: 12px; margin-top: 4px; }
+.place-details { display: grid; gap: 8px; margin-top: 12px; }
+.place-rating { font-size: 15px; }
 .summary {
   display: flex; gap: 16px; margin: 12px 0; padding: 10px 12px;
   background: var(--soft); border-radius: 8px;

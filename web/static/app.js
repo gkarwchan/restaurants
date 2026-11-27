@@ -11,6 +11,7 @@ const CALGARY = { lat: 51.0447, lng: -114.0719 };
 
 const state = { facilities: [], markers: [], types: new Set(TYPES), status: "all", query: "" };
 let map, clusterer, selectedId = null;
+let placeRequestId = 0;
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
@@ -117,7 +118,9 @@ window.initMap = async function () {
     if (!Number.isFinite(f.lat) || !Number.isFinite(f.lng)) return null;
     const dot = dotTemplate.cloneNode();
     dot.style.background = STATUS[f.status].color;
-    const m = new AdvancedMarkerElement({ position: { lat: f.lat, lng: f.lng }, content: dot, title: f.name });
+    if (f.hasPlaceInfo) dot.classList.add("has-place-info");
+    const title = f.hasPlaceInfo ? `${f.name} — Google Places details available` : f.name;
+    const m = new AdvancedMarkerElement({ position: { lat: f.lat, lng: f.lng }, content: dot, title });
     m.addListener("click", () => openFacility(f, m));
     m.facility = f;
     return m;
@@ -166,9 +169,20 @@ function buildControls() {
     t = setTimeout(() => { state.query = e.target.value.trim().toLowerCase(); applyFilters(); }, 250);
   });
   $("close").addEventListener("click", closePanel);
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closePanel(); });
+  $("place-dialog-close").addEventListener("click", () => $("place-dialog").close());
+  $("place-dialog").addEventListener("close", () => { placeRequestId++; });
+  $("panel-body").addEventListener("click", (e) => {
+    const link = e.target.closest(".place-info-link");
+    if (!link) return;
+    e.preventDefault();
+    openPlaceInfo(link.dataset.facilityId);
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !$("place-dialog").open) closePanel();
+  });
   $("legend").innerHTML = Object.values(STATUS).map((s) =>
-    `<div><span class="dot" style="background:${s.color}"></span>${esc(s.label)}</div>`).join("");
+    `<div><span class="dot" style="background:${s.color}"></span>${esc(s.label)}</div>`).join("")
+    + '<div><span class="dot places-legend-dot has-place-info"></span>Google Places details available</div>';
 }
 
 function matches(f) {
@@ -195,6 +209,7 @@ function applyFilters() {
 
 // ---------------------------------------------------------------- details panel
 async function openFacility(f, marker) {
+  if ($("place-dialog").open) $("place-dialog").close();
   selectedId = f.id;
   $("panel").hidden = false;
   $("panel-body").innerHTML = `<h2>${esc(f.name)}</h2><div class="meta">Loading…</div>`;
@@ -208,9 +223,29 @@ async function openFacility(f, marker) {
   $("panel-body").innerHTML = renderFacility(await res.json());
 }
 
+async function openPlaceInfo(facilityId) {
+  const dialog = $("place-dialog");
+  const body = $("place-dialog-body");
+  const requestId = ++placeRequestId;
+  body.innerHTML = '<h2 id="place-dialog-title">Google Places</h2><div class="meta">Loading details…</div>';
+  dialog.showModal();
+  try {
+    const response = await fetch(`/api/facilities/${encodeURIComponent(facilityId)}/place`);
+    const place = await response.json();
+    if (requestId !== placeRequestId || !dialog.open) return;
+    if (!response.ok) throw new Error(place.detail || "Could not load Google Places details.");
+    body.innerHTML = renderPlace(place);
+  } catch (error) {
+    if (requestId === placeRequestId && dialog.open) {
+      body.innerHTML = `<h2 id="place-dialog-title">Google Places</h2><p class="empty">${esc(error.message)}</p>`;
+    }
+  }
+}
+
 function closePanel() {
   selectedId = null;
   $("panel").hidden = true;
+  if ($("place-dialog").open) $("place-dialog").close();
 }
 
 function renderFacility(d) {
@@ -219,7 +254,8 @@ function renderFacility(d) {
   let html = `
     <h2>${esc(d.name)}</h2>
     <div class="meta">${esc(d.facility_group)} · ${esc(d.address)}${d.community ? " · " + esc(d.community) : ""}</div>
-    <a href="${esc(d.detail_url)}" target="_blank" rel="noopener">View on the AHS website ↗</a>`;
+    <a href="${esc(d.detail_url)}" target="_blank" rel="noopener">View on the AHS website ↗</a>
+    ${d.place_id ? ` · <a class="place-info-link" href="#" data-facility-id="${esc(d.id)}">More info</a>` : ""}`;
 
   if (!d.inspections_fetched_at) {
     return html + `<p class="empty">Inspection details for this facility haven't been downloaded yet.</p>`;
@@ -251,6 +287,38 @@ function renderFacility(d) {
       </details>`;
   }).join("");
   return html;
+}
+
+function renderPlace(place) {
+  const name = place.displayName?.text || "Google Place";
+  const rating = place.rating
+    ? `<div class="place-rating"><b>${esc(place.rating)} ★</b>${place.userRatingCount ? ` · ${Number(place.userRatingCount).toLocaleString()} reviews` : ""}</div>`
+    : "";
+  const photoAttributions = (place.photo_attributions || []).map((attribution) =>
+    attribution.uri
+      ? `<a href="${esc(attribution.uri)}" target="_blank" rel="noopener">${esc(attribution.displayName)}</a>`
+      : esc(attribution.displayName)).filter(Boolean).join(", ");
+  const photo = place.photo_url
+    ? `<img class="place-photo" src="${esc(place.photo_url)}" alt="Photo of ${esc(name)}">
+       ${photoAttributions ? `<div class="photo-attribution">Photo: ${photoAttributions}</div>` : ""}`
+    : "";
+  const types = (place.types || []).map((type) => esc(type.replaceAll("_", " "))).join(", ");
+  const website = place.websiteUri
+    ? `<div><a href="${esc(place.websiteUri)}" target="_blank" rel="noopener">Website ↗</a></div>`
+    : "";
+  const phone = place.nationalPhoneNumber ? `<div>${esc(place.nationalPhoneNumber)}</div>` : "";
+  const mapsLink = place.googleMapsUri
+    ? `<a href="${esc(place.googleMapsUri)}" target="_blank" rel="noopener">Open in Google Maps ↗</a>`
+    : "";
+  return `
+    <h2 id="place-dialog-title">${esc(name)}</h2>
+    ${photo}
+    <div class="place-details">
+      ${place.formattedAddress ? `<div>${esc(place.formattedAddress)}</div>` : ""}
+      ${rating}${phone}${website}
+      ${types ? `<div class="meta">${types}</div>` : ""}
+      ${mapsLink}
+    </div>`;
 }
 
 function renderViolation(v) {

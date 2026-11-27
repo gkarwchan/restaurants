@@ -86,6 +86,9 @@ ENV_VARS="GOOGLE_MAPS_BROWSER_KEY=${GOOGLE_MAPS_BROWSER_KEY}"
 if [[ -n "${GOOGLE_MAPS_MAP_ID:-}" ]]; then
   ENV_VARS+=",GOOGLE_MAPS_MAP_ID=${GOOGLE_MAPS_MAP_ID}"
 fi
+if [[ -n "${GOOGLE_GEOCODING_API_KEY:-}" ]]; then
+  ENV_VARS+=",GOOGLE_GEOCODING_API_KEY=${GOOGLE_GEOCODING_API_KEY}"
+fi
 
 gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com \
   --project "$PROJECT"
